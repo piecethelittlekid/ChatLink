@@ -11,7 +11,8 @@ export default defineConfig({
       manifest: {
         name: "ChatLink",
         short_name: "ChatLink",
-        description: "Private chat between your iPhone and Windows PC on the same Wi-Fi.",
+        description: "Trò chuyện riêng tư giữa iPhone và máy tính Windows trên cùng mạng Wi-Fi.",
+        lang: "vi",
         start_url: "/",
         scope: "/",
         display: "standalone",

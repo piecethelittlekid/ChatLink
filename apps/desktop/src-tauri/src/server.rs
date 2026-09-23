@@ -41,6 +41,7 @@ pub struct ServerSnapshot {
     pub selected_ip: Option<String>,
     pub https_url: Option<String>,
     pub setup_url: Option<String>,
+    pub certificate_setup_required: bool,
     pub ca_fingerprint: String,
     pub session_code: String,
     pub iphone_status: String,
@@ -83,7 +84,6 @@ pub struct ActiveClient {
 }
 
 pub struct ServerRuntime {
-    pub ip: Ipv4Addr,
     pub tls_handle: axum_server::Handle<SocketAddr>,
     pub tls_task: JoinHandle<()>,
     pub setup_cancel: CancellationToken,
@@ -119,6 +119,7 @@ pub fn create_core(
             selected_ip: None,
             https_url: None,
             setup_url: None,
+            certificate_setup_required: true,
             ca_fingerprint: fingerprint,
             session_code,
             iphone_status: "waiting".into(),
@@ -132,6 +133,7 @@ pub fn create_core(
 }
 
 pub async fn start(core: Arc<Core>, ip: Ipv4Addr) -> Result<ServerRuntime> {
+    let setup_required = !db::certificate_setup_complete(&core.pool).await?;
     let tls = certs::issue_server_certificate(&core.data_dir, ip)?;
     let tls_config = axum_server::tls_rustls::RustlsConfig::from_der(
         vec![tls.certificate_der],
@@ -157,7 +159,8 @@ pub async fn start(core: Arc<Core>, ip: Ipv4Addr) -> Result<ServerRuntime> {
 
     let setup_cancel = CancellationToken::new();
     let setup_addr = SocketAddr::from((ip, SETUP_PORT));
-    let setup_task = match tokio::net::TcpListener::bind(setup_addr).await {
+    let setup_task = if setup_required {
+        match tokio::net::TcpListener::bind(setup_addr).await {
         Ok(listener) => {
             let setup_router = Router::new()
                 .route("/", get(setup_page))
@@ -177,6 +180,9 @@ pub async fn start(core: Arc<Core>, ip: Ipv4Addr) -> Result<ServerRuntime> {
             tracing::warn!(%error, "certificate setup listener unavailable");
             None
         }
+        }
+    } else {
+        None
     };
 
     {
@@ -187,20 +193,24 @@ pub async fn start(core: Arc<Core>, ip: Ipv4Addr) -> Result<ServerRuntime> {
         status.setup_url = setup_task
             .as_ref()
             .map(|_| format!("http://{ip}:{SETUP_PORT}/"));
-        status.error = setup_task
-            .is_none()
+        status.certificate_setup_required = setup_required;
+        status.error = (setup_required && setup_task.is_none())
             .then(|| format!("Cổng tải chứng chỉ {SETUP_PORT} đang bận."));
     }
     tracing::info!(%ip, https_port = HTTPS_PORT, setup_port = SETUP_PORT, "ChatLink LAN server started");
 
-    Ok(ServerRuntime { ip, tls_handle, tls_task, setup_cancel, setup_task })
+    Ok(ServerRuntime { tls_handle, tls_task, setup_cancel, setup_task })
 }
 
-pub async fn stop(runtime: ServerRuntime) {
+pub async fn stop(mut runtime: ServerRuntime) {
     runtime.tls_handle.graceful_shutdown(Some(Duration::from_secs(2)));
-    runtime.setup_cancel.cancel();
+    stop_setup_listener(&mut runtime).await;
     let _ = tokio::time::timeout(Duration::from_secs(3), runtime.tls_task).await;
-    if let Some(task) = runtime.setup_task {
+}
+
+async fn stop_setup_listener(runtime: &mut ServerRuntime) {
+    runtime.setup_cancel.cancel();
+    if let Some(task) = runtime.setup_task.take() {
         let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
     }
 }
@@ -256,14 +266,17 @@ async fn handle_socket(mut socket: WebSocket, core: Arc<Core>) {
         .and_then(|message| message.payload)
         .and_then(|payload| payload.get("code").and_then(Value::as_str).map(str::to_owned));
     let expected_code = core.status.read().await.session_code.clone();
-    if code.as_deref() != Some(expected_code.as_str()) {
-        let limited = record_auth_failure(&core).await;
-        let _ = send_json(&mut socket, json!({
-            "type": "error",
-            "payload": { "code": if limited { "RATE_LIMITED" } else { "AUTH_FAILED" } }
-        })).await;
-        let _ = socket.close().await;
-        return;
+    match record_auth_attempt(&core, code.as_deref() == Some(expected_code.as_str())).await {
+        AuthDecision::Accepted => {}
+        decision @ (AuthDecision::Rejected | AuthDecision::RateLimited) => {
+            let error_code = if matches!(decision, AuthDecision::RateLimited) { "RATE_LIMITED" } else { "AUTH_FAILED" };
+            let _ = send_json(&mut socket, json!({
+                "type": "error",
+                "payload": { "code": error_code }
+            })).await;
+            let _ = socket.close().await;
+            return;
+        }
     }
 
     let session_id = Uuid::new_v4();
@@ -300,7 +313,7 @@ async fn handle_socket(mut socket: WebSocket, core: Arc<Core>) {
             },
             incoming = socket.recv() => match incoming {
                 Some(Ok(WsMessage::Text(text))) => {
-                    if let Err(error) = process_client_message(text.as_str(), &core, session_id, &outbound_tx, &mut last_pong).await {
+                    if let Err(error) = process_client_message(text.as_str(), &core, &outbound_tx, &mut last_pong).await {
                         tracing::warn!(%error, "rejected WebSocket message");
                         let code = if error.to_string().contains("rate exceeded") { "MESSAGE_RATE_LIMITED" } else { "INVALID_MESSAGE" };
                         let _ = outbound_tx.send(json!({ "type": "error", "payload": { "code": code } }).to_string());
@@ -320,20 +333,32 @@ async fn handle_socket(mut socket: WebSocket, core: Arc<Core>) {
     clear_active(&core, session_id).await;
 }
 
-async fn record_auth_failure(core: &Core) -> bool {
+enum AuthDecision {
+    Accepted,
+    Rejected,
+    RateLimited,
+}
+
+async fn record_auth_attempt(core: &Core, succeeded: bool) -> AuthDecision {
     let mut failures = core.auth_failures.lock().await;
     let now = Instant::now();
     while failures.front().is_some_and(|time| now.duration_since(*time) > Duration::from_secs(60)) {
         failures.pop_front();
     }
+    if failures.len() >= 5 {
+        return AuthDecision::RateLimited;
+    }
+    if succeeded {
+        failures.clear();
+        return AuthDecision::Accepted;
+    }
     failures.push_back(now);
-    failures.len() >= 5
+    if failures.len() >= 5 { AuthDecision::RateLimited } else { AuthDecision::Rejected }
 }
 
 async fn process_client_message(
     text: &str,
     core: &Arc<Core>,
-    session_id: Uuid,
     outbound: &mpsc::UnboundedSender<String>,
     last_pong: &mut Instant,
 ) -> Result<()> {
@@ -350,7 +375,7 @@ async fn process_client_message(
             let content = payload.get("content").and_then(Value::as_str).context("missing message content")?;
             anyhow::ensure!(!content.trim().is_empty(), "message content is empty");
             anyhow::ensure!(content.len() <= MAX_MESSAGE_BYTES, "message exceeds 8 KB");
-            enforce_message_rate_limit(core, session_id).await?;
+            enforce_message_rate_limit(core, Uuid::from_u128(1)).await?;
 
             let inserted = db::insert_message(&core.pool, &id, "iphone-main", content, "stored").await?;
             let created_at = timestamp();
@@ -416,7 +441,6 @@ async fn clear_active(core: &Core, session_id: Uuid) {
         core.status.write().await.iphone_status = "waiting".into();
         tracing::info!("iPhone WebSocket disconnected");
     }
-    core.message_windows.lock().await.remove(&session_id);
 }
 
 async fn push_recent(core: &Core, message: DesktopMessage) {
@@ -445,6 +469,7 @@ fn timestamp() -> String {
 pub async fn send_from_desktop(core: &Arc<Core>, content: String) -> Result<DesktopMessage> {
     anyhow::ensure!(!content.trim().is_empty(), "Tin nhắn không được để trống.");
     anyhow::ensure!(content.len() <= MAX_MESSAGE_BYTES, "Tin nhắn vượt giới hạn 8 KB.");
+    enforce_message_rate_limit(core, Uuid::nil()).await?;
     let id = Ulid::new().to_string();
     let created_at = timestamp();
     db::insert_message(&core.pool, &id, "windows-main", &content, "pending_delivery").await?;
@@ -514,6 +539,25 @@ pub async fn restart(core: Arc<Core>, runtime_slot: &Mutex<Option<ServerRuntime>
             Err(error)
         }
     }
+}
+
+pub async fn confirm_certificate_setup(
+    core: &Arc<Core>,
+    runtime_slot: &Mutex<Option<ServerRuntime>>,
+) -> Result<ServerSnapshot> {
+    db::set_certificate_setup_complete(&core.pool).await?;
+    if let Some(runtime) = runtime_slot.lock().await.as_mut() {
+        stop_setup_listener(runtime).await;
+    }
+    {
+        let mut status = core.status.write().await;
+        status.certificate_setup_required = false;
+        status.setup_url = None;
+        if status.status == "online" {
+            status.error = None;
+        }
+    }
+    Ok(status(core).await)
 }
 
 pub fn web_root(app: &tauri::AppHandle) -> PathBuf {

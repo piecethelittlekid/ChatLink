@@ -8,6 +8,7 @@ type Snapshot = {
   selectedIp: string | null;
   httpsUrl: string | null;
   setupUrl: string | null;
+  certificateSetupRequired: boolean;
   caFingerprint: string;
   sessionCode: string;
   iphoneStatus: string;
@@ -26,7 +27,7 @@ type InterfaceOption = { ip: string; label: string };
 
 const EMPTY_SNAPSHOT: Snapshot = {
   status: "starting", interfaces: [], selectedIp: null, httpsUrl: null, setupUrl: null,
-  caFingerprint: "", sessionCode: "------", iphoneStatus: "waiting", error: null,
+  certificateSetupRequired: true, caFingerprint: "", sessionCode: "------", iphoneStatus: "waiting", error: null,
 };
 
 function formatTime(value: string) {
@@ -53,6 +54,7 @@ export function DesktopApp() {
         invoke<InterfaceOption[]>("list_interfaces"),
       ]);
       setSnapshot(nextStatus);
+      setCertificateInstalled(!nextStatus.certificateSetupRequired);
       setMessages(nextMessages);
       setInterfaces(nextInterfaces);
     } catch (reason) {
@@ -88,7 +90,8 @@ export function DesktopApp() {
       await invoke<Message>("send_message", { content });
     } catch (reason) {
       setDraft(content);
-      setError(String(reason));
+      const detail = String(reason);
+      setError(detail.includes("message rate exceeded") ? "Bạn đang gửi quá nhanh. Hãy đợi một chút rồi thử lại." : detail);
     }
   }
 
@@ -107,13 +110,25 @@ export function DesktopApp() {
   }
 
   async function copySetupUrl() {
-    if (!snapshot.setupUrl) return;
+    const url = certificateInstalled ? snapshot.httpsUrl : snapshot.setupUrl;
+    if (!url) return;
     try {
-      await navigator.clipboard.writeText(snapshot.setupUrl);
+      await navigator.clipboard.writeText(url);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1800);
     } catch {
       setError("Không sao chép được liên kết. Bạn có thể mở URL bằng điện thoại trong cùng Wi-Fi.");
+    }
+  }
+
+  async function confirmCertificateSetup() {
+    setError("");
+    try {
+      const nextStatus = await invoke<Snapshot>("confirm_certificate_setup");
+      setSnapshot(nextStatus);
+      setCertificateInstalled(true);
+    } catch (reason) {
+      setError(String(reason));
     }
   }
 
@@ -168,12 +183,12 @@ export function DesktopApp() {
                 </div>
                 <div className="connect-url-label">ĐỊA CHỈ CHATLINK</div>
                 <div className="connect-url">{snapshot.httpsUrl?.replace(/\/$/, "") ?? "Chưa có IP LAN"}</div>
-                {!certificateInstalled && <button className="copy-link" onClick={() => setCertificateInstalled(true)} disabled={!snapshot.httpsUrl}>Đã cài và bật tin cậy chứng chỉ<span>✓</span></button>}
+                {!certificateInstalled && <button className="copy-link" onClick={() => void confirmCertificateSetup()} disabled={!snapshot.setupUrl}>Đã cài và bật tin cậy chứng chỉ<span>✓</span></button>}
                 <div className="connect-divider"><span />MÃ TRUY CẬP<span /></div>
                 <div className="access-code" aria-label={`Mã truy cập ${snapshot.sessionCode}`}>{codeGroups.map((digit, index) => <span className={index === 3 ? "split" : ""} key={`${index}-${digit}`}>{digit}</span>)}</div>
                 <p className="code-hint">Nhập mã này trên iPhone sau khi mở trang.</p>
-                <div className="certificate-note"><div className="certificate-icon">⌑</div><div><strong>Cài chứng chỉ HTTPS</strong><span>Trước lần kết nối đầu, tải profile và bật tin cậy trên iPhone.</span></div></div>
-                <button className="copy-link" onClick={() => void copySetupUrl()} disabled={!snapshot.setupUrl}>{copied ? "Đã sao chép liên kết" : "Sao chép link cài chứng chỉ"}<span>⧉</span></button>
+                <div className="certificate-note"><div className="certificate-icon">⌑</div><div><strong>{certificateInstalled ? "Chứng chỉ HTTPS đã sẵn sàng" : "Cài chứng chỉ HTTPS"}</strong><span>{certificateInstalled ? "iPhone đã tin cậy CA. Nếu đổi IP máy tính, hãy quét QR mới và thêm biểu tượng từ Safari." : "Trước lần kết nối đầu, tải profile và bật tin cậy trên iPhone."}</span></div></div>
+              <button className="copy-link" onClick={() => void copySetupUrl()} disabled={!(certificateInstalled ? snapshot.httpsUrl : snapshot.setupUrl)}>{copied ? "Đã sao chép liên kết" : certificateInstalled ? "Sao chép địa chỉ ChatLink" : "Sao chép link cài chứng chỉ"}<span>⧉</span></button>
               </aside>
             </section>
             {snapshot.error && <div className="status-banner">{snapshot.error}</div>}

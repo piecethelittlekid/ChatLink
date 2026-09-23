@@ -6,12 +6,11 @@ use rcgen::{
 };
 use sha2::{Digest, Sha256};
 use std::{net::Ipv4Addr, path::Path};
+use time::{Duration, OffsetDateTime};
 
 pub struct CertificateBundle {
     pub certificate_der: Vec<u8>,
     pub private_key_der: Vec<u8>,
-    pub root_certificate_der: Vec<u8>,
-    pub fingerprint: String,
 }
 
 pub fn root_fingerprint(root_der: &[u8]) -> String {
@@ -41,7 +40,7 @@ pub fn create_or_load_ca(data_dir: &Path) -> Result<Vec<u8>> {
 }
 
 pub fn issue_server_certificate(data_dir: &Path, ip: Ipv4Addr) -> Result<CertificateBundle> {
-    let root_der = create_or_load_ca(data_dir)?;
+    let _ = create_or_load_ca(data_dir)?;
     let protected_key = std::fs::read(data_dir.join("chatlink-root-ca.key.dpapi"))
         .context("read protected CA key")?;
     let key_pem = unprotect_key(&protected_key)?;
@@ -52,23 +51,26 @@ pub fn issue_server_certificate(data_dir: &Path, ip: Ipv4Addr) -> Result<Certifi
     let leaf_key = KeyPair::generate().context("generate server key")?;
     let mut leaf_params = CertificateParams::new(vec![ip.to_string()])
         .context("create server certificate parameters")?;
+    let now = OffsetDateTime::now_utc();
+    leaf_params.not_before = now - Duration::days(1);
+    leaf_params.not_after = now + Duration::days(397);
     leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     let leaf = leaf_params
         .signed_by(&leaf_key, &issuer)
         .context("sign server certificate")?;
 
-    let fingerprint = root_fingerprint(&root_der);
     Ok(CertificateBundle {
         certificate_der: leaf.der().as_ref().to_vec(),
         private_key_der: leaf_key.serialize_der(),
-        root_certificate_der: root_der,
-        fingerprint,
     })
 }
 
 fn ca_params() -> CertificateParams {
     let mut params = CertificateParams::default();
+    let now = OffsetDateTime::now_utc();
+    params.not_before = now - Duration::days(1);
+    params.not_after = now + Duration::days(3650);
     params.distinguished_name.push(DnType::CommonName, "ChatLink Local CA");
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];

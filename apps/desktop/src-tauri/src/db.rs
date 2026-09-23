@@ -7,9 +7,7 @@ use std::path::Path;
 #[serde(rename_all = "camelCase")]
 pub struct StoredMessage {
     pub id: String,
-    pub sender: String,
     pub content: String,
-    pub status: String,
     pub created_at: String,
 }
 
@@ -73,7 +71,7 @@ pub async fn insert_message(
         .await
         .context("check duplicate message")?;
         anyhow::ensure!(
-            existing.as_ref().is_some_and(|(old_sender, old_content)| old_sender == sender && old_content == content),
+            existing.as_ref().is_some_and(|(old_sender, old_content)| old_sender.as_str() == sender && old_content.as_str() == content),
             "message id already exists with different content"
         );
     }
@@ -92,20 +90,38 @@ pub async fn mark_delivered(pool: &SqlitePool, id: &str) -> Result<()> {
 }
 
 pub async fn pending_delivery(pool: &SqlitePool) -> Result<Vec<StoredMessage>> {
-    let rows = sqlx::query_as::<_, (String, String, String, String)>(
-        "SELECT id, sender_device_id, content, created_at FROM messages WHERE status = 'pending_delivery' ORDER BY created_at",
+    let rows = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT id, content, created_at FROM messages WHERE status = 'pending_delivery' ORDER BY created_at",
     )
     .fetch_all(pool)
     .await
     .context("load pending delivery messages")?;
     Ok(rows
         .into_iter()
-        .map(|(id, sender, content, created_at)| StoredMessage {
+        .map(|(id, content, created_at)| StoredMessage {
             id,
-            sender,
             content,
-            status: "stored".into(),
             created_at,
         })
         .collect())
+}
+
+pub async fn certificate_setup_complete(pool: &SqlitePool) -> Result<bool> {
+    let value = sqlx::query_scalar::<_, String>(
+        "SELECT value FROM app_settings WHERE key = 'certificate_setup_complete'",
+    )
+    .fetch_optional(pool)
+    .await
+    .context("read certificate setup status")?;
+    Ok(value.as_deref() == Some("true"))
+}
+
+pub async fn set_certificate_setup_complete(pool: &SqlitePool) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO app_settings(key, value) VALUES('certificate_setup_complete', 'true') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .execute(pool)
+    .await
+    .context("save certificate setup status")?;
+    Ok(())
 }

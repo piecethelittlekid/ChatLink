@@ -4,9 +4,15 @@
   "version": "0.1.0",
   "identifier": "com.chatlink.desktop",
   "build": {
-    "beforeDevCommand": "npm.cmd run build:mobile --prefix ../../",
+    "beforeDevCommand": {
+      "script": "npm.cmd run tauri:dev:frontend",
+      "cwd": ".."
+    },
     "devUrl": "http://127.0.0.1:1420",
-    "beforeBuildCommand": "npm.cmd run build:mobile --prefix ../../",
+    "beforeBuildCommand": {
+      "script": "npm.cmd run build:mobile --prefix ../../",
+      "cwd": ".."
+    },
     "frontendDist": "../dist"
   },
   "app": {
@@ -21,7 +27,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost ws://127.0.0.1:1420"
     }
   },
   "bundle": {

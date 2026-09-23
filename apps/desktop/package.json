@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+    "tauri:dev:frontend": "npm.cmd run build:mobile --prefix ../../ && npm run dev",
     "tauri:dev": "tauri dev",
     "build:frontend": "tsc -p tsconfig.json && vite build",
     "build": "npm run build:frontend && tauri build",

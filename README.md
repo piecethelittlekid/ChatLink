@@ -1,19 +1,19 @@
 # ChatLink
 
-ChatLink is a Windows-hosted, LAN-only text chat for one Windows PC and one iPhone. The desktop app serves an HTTPS progressive web app and a WebSocket endpoint on the same private IPv4 address.
+ChatLink là ứng dụng chat văn bản chạy trên máy Windows, kết nối riêng tư qua mạng LAN với một iPhone. Ứng dụng desktop phục vụ PWA qua HTTPS và WebSocket trên cùng địa chỉ IPv4.
 
-## Requirements
+## Yêu cầu
 
-- Node.js 20 or newer and npm
-- Rust stable with the MSVC target
-- Microsoft C++ Build Tools with **Desktop development with C++**
+- Node.js 20 trở lên và npm
+- Rust stable với target MSVC
+- Microsoft C++ Build Tools, workload **Desktop development with C++**
 - Microsoft Edge WebView2 Runtime
 
-The iPhone must be on the same Wi-Fi network. Initial HTTPS setup requires installing the local ChatLink root certificate profile and enabling full trust for it in iOS Certificate Trust Settings.
+iPhone cần kết nối cùng Wi-Fi với máy tính. Ở lần thiết lập đầu, hãy cài profile CA cục bộ của ChatLink và bật tin cậy đầy đủ trong phần cài đặt chứng chỉ của iOS.
 
-When Windows Firewall prompts for network access, allow ChatLink on **Private networks only**. Do not enable access on Public networks.
+Khi Windows Firewall hỏi quyền truy cập mạng, chỉ cho phép ChatLink trên **mạng Private**. Không bật quyền trên mạng Public.
 
-## Development
+## Phát triển
 
 ```powershell
 npm.cmd install
@@ -22,31 +22,33 @@ npm.cmd run build:mobile
 npm.cmd run dev:desktop
 ```
 
-To open the mobile UI in a desktop browser during development:
+Để mở giao diện iPhone trong trình duyệt desktop khi phát triển:
 
 ```powershell
 npm.cmd run dev:mobile
 ```
 
-## Build
+## Đóng gói
 
 ```powershell
 npm.cmd run build
 ```
 
-The Tauri bundle includes the mobile web build as a resource. SQLite data and the local certificate authority are stored under `%APPDATA%\ChatLink`.
+Bản Tauri đóng gói bản build mobile làm tài nguyên. SQLite và CA cục bộ được lưu trong thư mục dữ liệu riêng của ứng dụng; chọn **Mở thư mục dữ liệu** trong ChatLink để xem đường dẫn chính xác.
 
-## First iPhone setup
+## Thiết lập iPhone lần đầu
 
-1. Keep the Windows app open and scan the QR code shown in ChatLink.
-2. Compare the page fingerprint with the fingerprint shown on Windows.
-3. Download the profile, install it in iPhone Settings, then enable full trust under **Settings → General → About → Certificate Trust Settings**.
-4. In ChatLink on Windows, select **Đã cài và bật tin cậy chứng chỉ**, scan the updated QR code, and add ChatLink to the Home Screen from Safari.
-5. Enter the six-digit access code displayed in ChatLink on Windows.
+1. Mở ứng dụng Windows và quét QR đang hiển thị.
+2. So sánh fingerprint trên trang cài đặt với fingerprint trong ChatLink trên máy tính.
+3. Tải profile, cài profile trong Settings của iPhone, rồi bật tin cậy đầy đủ tại **Settings → General → About → Certificate Trust Settings**.
+4. Trên Windows, xác nhận đã cài và bật tin cậy chứng chỉ. Quét QR mới để mở ChatLink qua HTTPS trong Safari, sau đó thêm ứng dụng vào Home Screen.
+5. Nhập mã truy cập sáu chữ số đang hiển thị trên Windows.
 
-## Milestone boundaries
+Sau khi xác nhận cài CA, cổng HTTP dùng để tải profile sẽ dừng. Trạng thái này được lưu để những lần mở ChatLink tiếp theo chỉ phục vụ HTTPS.
 
-- Messages are stored in SQLite before the server acknowledges them.
-- The iPhone keeps its unacknowledged outbox in memory until the page closes. Durable mobile history and IndexedDB sync are planned for Milestone 4.
-- The temporary access code changes whenever the desktop app starts. Persistent pairing and device tokens are planned for Milestone 5.
-- HTTPS certificate installation is required for the iPhone service worker. Only the public CA certificate is included in the downloadable iOS profile; its private key stays protected by Windows DPAPI.
+## Phạm vi hiện tại
+
+- Tin nhắn được ghi vào SQLite trước khi server xác nhận `stored`.
+- Tin iPhone chưa được xác nhận giữ trong bộ nhớ trang hiện tại; lịch sử bền vững trên iPhone và đồng bộ IndexedDB thuộc Milestone 4.
+- Mã truy cập thay đổi mỗi khi mở ứng dụng desktop. Pairing lâu dài và device token thuộc Milestone 5.
+- Chỉ chứng chỉ CA công khai được đưa vào profile iOS. Khóa riêng CA được bảo vệ bằng Windows DPAPI.
