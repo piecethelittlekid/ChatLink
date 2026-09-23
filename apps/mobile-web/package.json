@@ -1,0 +1,27 @@
+{
+  "name": "@chatlink/mobile-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5173 --strictPort",
+    "prebuild": "npm.cmd run build:protocol --prefix ../../ && node scripts/create-icons.mjs",
+    "precheck": "npm.cmd run build:protocol --prefix ../../",
+    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@chatlink/protocol": "^0.1.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "ulid": "^3.0.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.2",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.5",
+    "vite-plugin-pwa": "^1.0.3"
+  }
+}

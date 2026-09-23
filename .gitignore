@@ -1,0 +1,8 @@
+node_modules/
+.npm-cache/
+**/dist/
+**/target/
+*.log
+.DS_Store
+Thumbs.db
+apps/desktop/src-tauri/gen/
