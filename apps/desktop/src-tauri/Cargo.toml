@@ -22,6 +22,7 @@ get_if_addrs = "0.5"
 futures-util = "0.3"
 rand = "0.9"
 rcgen = { version = "0.14", features = ["pem", "ring"] }
+rustls = { version = "0.23", features = ["aws_lc_rs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -35,6 +36,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 ulid = "1"
 uuid = { version = "1", features = ["v4"] }
+x509-parser = "0.18"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-dpapi = "0.2"
+winreg = "0.55"
+
+[dev-dependencies]
+tokio-tungstenite = "0.29"

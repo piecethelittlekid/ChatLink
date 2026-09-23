@@ -22,7 +22,15 @@ h1, h2, p { margin-top: 0; }
 .primary-button span { font-size: 19px; font-weight: 400; transition: transform .18s ease; }
 .primary-button:hover { background: #3f5289; }
 .primary-button:hover span { transform: translateX(3px); }
+.cancel-pairing { min-height: 32px; border: 0; background: transparent; color: #5265a2; font-size: 11px; }
 .setup-footnote { margin: 20px 0 0; color: #999eaa; font-size: 10px; text-align: center; }
+.transfer-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+.transfer-actions button, .transfer-actions label { display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 7px 10px; border: 1px solid #dfe3ee; border-radius: 9px; background: #fff; color: #52659d; font-size: 11px; font-weight: 700; cursor: pointer; }
+.transfer-actions button:disabled { color: #adb3bf; cursor: default; }
+.transfer-actions input { display: none; }
+.mobile-options { padding: 12px 16px 16px; border-bottom: 1px solid #e9ebf0; background: #fff; }
+.mobile-options p { margin: 0; color: #737c8d; font-size: 11px; line-height: 1.5; }
+.mobile-options > button { margin-top: 12px; padding: 8px 10px; border: 1px solid #ead7d7; border-radius: 9px; background: #fff; color: #a04e4e; font-size: 11px; }
 .form-error { margin: -7px 0 0; color: #b14747; font-size: 11px; line-height: 1.45; }
 .version-note { margin: 21px 0 0; color: #a5aab5; font-size: 10px; }
 .chat-shell { display: flex; flex-direction: column; height: 100vh; height: 100dvh; padding-top: env(safe-area-inset-top); }

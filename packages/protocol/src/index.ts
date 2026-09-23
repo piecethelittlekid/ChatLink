@@ -11,7 +11,22 @@ export const envelopeSchema = z.object({
 
 export const authSchema = envelopeSchema.extend({
   type: z.literal("auth"),
+  payload: z.object({ deviceId: z.string().uuid(), token: z.string().min(40) }),
+});
+
+export const pairingRequestSchema = envelopeSchema.extend({
+  type: z.literal("pairing_request"),
   payload: z.object({ code: z.string().regex(/^\d{6}$/) }),
+});
+
+export const pairingOkSchema = envelopeSchema.extend({
+  type: z.literal("pairing_ok"),
+  payload: z.object({ deviceId: z.string().uuid(), token: z.string() }),
+});
+
+export const syncRequestSchema = envelopeSchema.extend({
+  type: z.literal("sync_request"),
+  payload: z.object({ afterSeq: z.number().int().nonnegative() }),
 });
 
 export const chatMessageSchema = envelopeSchema.extend({
@@ -22,7 +37,7 @@ export const chatMessageSchema = envelopeSchema.extend({
 
 export const messageAckSchema = envelopeSchema.extend({
   type: z.literal("message_ack"),
-  payload: z.object({ messageId: messageIdSchema, status: z.literal("stored") }),
+  payload: z.object({ messageId: messageIdSchema, status: z.literal("stored"), seq: z.number().int().positive(), createdAt: z.string() }),
 });
 
 export const deliveredSchema = envelopeSchema.extend({
@@ -34,12 +49,15 @@ export type Envelope = z.infer<typeof envelopeSchema>;
 export type ChatMessageEnvelope = z.infer<typeof chatMessageSchema>;
 
 export type ChatMessage = {
+  seq?: number;
   id: string;
   sender: "windows" | "iphone";
   content: string;
   status: "pending" | "stored" | "delivered";
   createdAt: string;
 };
+
+export type Credentials = { deviceId: string; token: string };
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected";
 

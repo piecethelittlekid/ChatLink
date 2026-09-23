@@ -3,7 +3,6 @@ mod db;
 mod network;
 mod server;
 
-use rand::Rng;
 use server::{Core, DesktopMessage, InterfaceOption, ServerRuntime, ServerSnapshot};
 use std::{net::Ipv4Addr, sync::Arc};
 use tauri::{Manager, State};
@@ -37,15 +36,22 @@ fn list_interfaces() -> Vec<InterfaceOption> {
 }
 
 #[tauri::command]
-async fn select_network_interface(ip: String, state: State<'_, AppState>) -> Result<ServerSnapshot, String> {
+async fn select_network_interface(
+    ip: String,
+    state: State<'_, AppState>,
+) -> Result<ServerSnapshot, String> {
     if !state.database_available {
         return Err("Server chưa chạy vì cơ sở dữ liệu không khả dụng.".into());
     }
-    let address = ip.parse::<Ipv4Addr>().map_err(|_| "Địa chỉ IPv4 không hợp lệ.".to_string())?;
+    let address = ip
+        .parse::<Ipv4Addr>()
+        .map_err(|_| "Địa chỉ IPv4 không hợp lệ.".to_string())?;
     if !state.certificates_available {
         return Err("Server chưa chạy vì không tạo hoặc mở được chứng chỉ HTTPS. Hãy kiểm tra thư mục dữ liệu rồi khởi động lại ChatLink.".into());
     }
-    let known = server::available_interfaces().iter().any(|option| option.ip == ip);
+    let known = server::available_interfaces()
+        .iter()
+        .any(|option| option.ip == ip);
     if !known {
         return Err("Địa chỉ không còn thuộc một interface LAN đang hoạt động.".into());
     }
@@ -56,15 +62,30 @@ async fn select_network_interface(ip: String, state: State<'_, AppState>) -> Res
 }
 
 #[tauri::command]
-async fn send_message(content: String, state: State<'_, AppState>) -> Result<DesktopMessage, String> {
+async fn send_message(
+    content: String,
+    state: State<'_, AppState>,
+) -> Result<DesktopMessage, String> {
     server::send_from_desktop(&state.core, content)
         .await
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-async fn get_recent_messages(state: State<'_, AppState>) -> Vec<DesktopMessage> {
-    server::recent_messages(&state.core).await
+async fn get_recent_messages(
+    before_seq: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<Vec<DesktopMessage>, String> {
+    server::recent_messages(&state.core, before_seq)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn unpair_iphone(state: State<'_, AppState>) -> Result<ServerSnapshot, String> {
+    server::unpair(&state.core)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -114,7 +135,6 @@ pub fn run() {
             let certificates_available = certificate_error.is_none();
             let fingerprint = certs::root_fingerprint(&root_certificate_der);
             let interfaces = network::lan_ipv4_addresses();
-            let session_code = format!("{:06}", rand::rng().random_range(0..1_000_000_u32));
             let web_root = server::web_root(&app_handle);
             let core = server::create_core(
                 pool,
@@ -122,7 +142,6 @@ pub fn run() {
                 web_root,
                 root_certificate_der,
                 fingerprint,
-                session_code,
                 interfaces.clone(),
             );
             let runtime = if let Some(error) = database_error {
@@ -156,6 +175,7 @@ pub fn run() {
             select_network_interface,
             send_message,
             get_recent_messages,
+            unpair_iphone,
             open_data_folder
         ])
         .run(tauri::generate_context!())

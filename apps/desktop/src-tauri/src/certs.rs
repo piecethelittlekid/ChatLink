@@ -2,10 +2,13 @@ use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose,
+    KeyUsagePurpose, SanType,
 };
 use sha2::{Digest, Sha256};
-use std::{net::Ipv4Addr, path::Path};
+use std::{
+    net::{IpAddr, Ipv4Addr},
+    path::Path,
+};
 use time::{Duration, OffsetDateTime};
 
 pub struct CertificateBundle {
@@ -25,18 +28,53 @@ pub fn create_or_load_ca(data_dir: &Path) -> Result<Vec<u8>> {
     std::fs::create_dir_all(data_dir).context("create certificate directory")?;
     let cert_path = data_dir.join("chatlink-root-ca.der");
     let key_path = data_dir.join("chatlink-root-ca.key.dpapi");
-    if cert_path.exists() && key_path.exists() {
-        return Ok(std::fs::read(cert_path).context("read local root certificate")?);
+    anyhow::ensure!(
+        cert_path.exists() == key_path.exists(),
+        "CA certificate and protected key are incomplete; restore both files from the same backup"
+    );
+    if cert_path.exists() {
+        let cert_der = std::fs::read(cert_path).context("read local root certificate")?;
+        let protected = std::fs::read(key_path).context("read protected CA key")?;
+        let plain = unprotect_key(&protected)?;
+        let key_text = std::str::from_utf8(&plain).context("decode CA private key")?;
+        let key = KeyPair::from_pem(key_text).context("load CA private key")?;
+        validate_ca_pair(&cert_der, &key)?;
+        return Ok(cert_der);
     }
 
     let key = KeyPair::generate().context("generate local CA key")?;
     let params = ca_params();
     let cert = params.self_signed(&key).context("self-sign local CA")?;
+    validate_ca_pair(cert.der().as_ref(), &key)?;
     let key_pem = key.serialize_pem();
     let protected_key = protect_key(key_pem.as_bytes())?;
     write_private_file(&key_path, &protected_key)?;
     std::fs::write(&cert_path, cert.der().as_ref()).context("write local root certificate")?;
     Ok(cert.der().as_ref().to_vec())
+}
+
+fn validate_ca_pair(cert_der: &[u8], key: &KeyPair) -> Result<()> {
+    let (remaining, certificate) = x509_parser::parse_x509_certificate(cert_der)
+        .map_err(|_| anyhow::anyhow!("CA certificate is invalid"))?;
+    anyhow::ensure!(
+        remaining.is_empty(),
+        "CA certificate contains unexpected data"
+    );
+    anyhow::ensure!(
+        certificate.tbs_certificate.is_ca(),
+        "CA certificate is not a CA"
+    );
+    anyhow::ensure!(
+        certificate
+            .tbs_certificate
+            .subject_pki
+            .subject_public_key
+            .data
+            .as_ref()
+            == key.public_key_raw(),
+        "CA certificate does not match its protected key"
+    );
+    Ok(())
 }
 
 pub fn issue_server_certificate(data_dir: &Path, ip: Ipv4Addr) -> Result<CertificateBundle> {
@@ -49,8 +87,11 @@ pub fn issue_server_certificate(data_dir: &Path, ip: Ipv4Addr) -> Result<Certifi
     let issuer = Issuer::new(ca_params(), ca_key);
 
     let leaf_key = KeyPair::generate().context("generate server key")?;
-    let mut leaf_params = CertificateParams::new(vec![ip.to_string()])
+    let mut leaf_params = CertificateParams::new(Vec::<String>::new())
         .context("create server certificate parameters")?;
+    leaf_params
+        .subject_alt_names
+        .push(SanType::IpAddress(IpAddr::V4(ip)));
     let now = OffsetDateTime::now_utc();
     leaf_params.not_before = now - Duration::days(1);
     leaf_params.not_after = now + Duration::days(397);
@@ -71,7 +112,9 @@ fn ca_params() -> CertificateParams {
     let now = OffsetDateTime::now_utc();
     params.not_before = now - Duration::days(1);
     params.not_after = now + Duration::days(3650);
-    params.distinguished_name.push(DnType::CommonName, "ChatLink Local CA");
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "ChatLink Local CA");
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     params
@@ -106,8 +149,8 @@ pub fn mobileconfig(root_der: &[u8]) -> String {
 fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::fs::OpenOptionsExt;
         use std::fs::OpenOptions;
+        use std::os::windows::fs::OpenOptionsExt;
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(true)
@@ -146,4 +189,47 @@ fn unprotect_key(bytes: &[u8]) -> Result<Vec<u8>> {
 #[cfg(not(target_os = "windows"))]
 fn unprotect_key(_bytes: &[u8]) -> Result<Vec<u8>> {
     anyhow::bail!("ChatLink certificate storage is supported only on Windows")
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+    use x509_parser::extensions::GeneralName;
+
+    #[test]
+    fn leaf_contains_ip_san_and_corrupt_ca_is_rejected() -> Result<()> {
+        let directory =
+            std::env::temp_dir().join(format!("chatlink-cert-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory)?;
+        let result = (|| -> Result<()> {
+            let root = create_or_load_ca(&directory)?;
+            assert_eq!(create_or_load_ca(&directory)?, root);
+            let ip = Ipv4Addr::new(192, 168, 50, 7);
+            let leaf = issue_server_certificate(&directory, ip)?;
+            let (_, parsed) = x509_parser::parse_x509_certificate(&leaf.certificate_der)
+                .map_err(|error| anyhow::anyhow!("parse leaf certificate: {error:?}"))?;
+            let san = parsed
+                .subject_alternative_name()?
+                .context("leaf missing SAN")?;
+            assert!(san.value.general_names.iter().any(|name| {
+                matches!(name, GeneralName::IPAddress(bytes) if bytes.iter().copied().eq(ip.octets()))
+            }));
+            std::fs::write(directory.join("chatlink-root-ca.der"), [0_u8, 1, 2])?;
+            assert!(create_or_load_ca(&directory).is_err());
+            Ok(())
+        })();
+        if let (Ok(resolved), Ok(root)) = (
+            directory.canonicalize(),
+            std::env::temp_dir().canonicalize(),
+        ) {
+            if resolved.starts_with(root)
+                && resolved
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("chatlink-cert-test-"))
+            {
+                let _ = std::fs::remove_dir_all(&resolved);
+            }
+        }
+        result
+    }
 }

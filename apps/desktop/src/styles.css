@@ -42,6 +42,9 @@ button { cursor: pointer; }
 .conversation-label div:nth-child(2) span { margin-top: 3px; color: #9a9fac; font-size: 9px; }
 .online-dot { margin-left: auto; }
 .desktop-messages { display: flex; flex: 1; flex-direction: column; gap: 10px; overflow: auto; padding: 23px 22px; }
+.load-older { align-self: center; padding: 7px 12px; border: 1px solid #dfe3ee; border-radius: 9px; background: #fff; color: #52659d; font-size: 11px; }
+.paired-note { margin: 14px 0; color: #50629a; text-align: center; font-size: 12px; font-weight: 700; }
+.unpair-button { margin-top: 16px; color: #a74646; }
 .desktop-empty { display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; padding: 20px; text-align: center; }
 .empty-illustration { position: relative; display: grid; place-items: center; width: 106px; height: 83px; margin-bottom: 15px; border-radius: 27px; background: #eff1f7; color: #53669d; }
 .empty-illustration span { position: absolute; top: 14px; right: 19px; color: #a7b0ce; font-size: 13px; }

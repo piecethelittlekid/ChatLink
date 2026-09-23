@@ -10,6 +10,7 @@
     "dev:desktop": "npm run build:protocol && npm run tauri:dev --workspace @chatlink/desktop",
     "build:desktop": "npm run build --workspace @chatlink/desktop",
     "build": "npm run build:protocol && npm run build:desktop",
+    "test:storage": "npm run build:mobile && node apps/mobile-web/tests/storage-test.mjs",
     "check": "npm run build:protocol && npm run check --workspace @chatlink/mobile-web && npm run check --workspace @chatlink/desktop"
   },
   "devDependencies": { "typescript": "^5.9.2" }

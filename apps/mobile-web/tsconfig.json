@@ -1,5 +1,5 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "jsx": "react-jsx", "types": ["vite/client", "vite-plugin-pwa/client"] },
-  "include": ["src", "vite.config.ts"]
+  "include": ["src", "tests/**/*.ts", "vite.config.ts"]
 }
