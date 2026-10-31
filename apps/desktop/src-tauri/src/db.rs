@@ -20,11 +20,13 @@ pub struct StoredMessage {
 
 #[derive(Debug)]
 pub struct InsertOutcome {
+    #[allow(dead_code)]
     pub inserted: bool,
     pub message: StoredMessage,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PairedDevice {
     pub id: String,
     pub name: String,
@@ -165,16 +167,48 @@ pub async fn recent_messages(
 
 pub async fn paired_device(pool: &SqlitePool) -> Result<Option<PairedDevice>> {
     let row = sqlx::query_as::<_, (String, String, String)>(
-        "SELECT id, name, token_hash FROM devices LIMIT 1",
+        "SELECT id, name, token_hash FROM devices ORDER BY last_seen_at DESC LIMIT 1",
     )
     .fetch_optional(pool)
     .await
-    .context("load paired iPhone")?;
+    .context("load paired device")?;
     Ok(row.map(|(id, name, token_hash)| PairedDevice {
         id,
         name,
         token_hash,
     }))
+}
+
+pub async fn get_device(pool: &SqlitePool, id: &str) -> Result<Option<PairedDevice>> {
+    let row = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT id, name, token_hash FROM devices WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .context("load device by id")?;
+    Ok(row.map(|(id, name, token_hash)| PairedDevice {
+        id,
+        name,
+        token_hash,
+    }))
+}
+
+pub async fn list_paired_devices(pool: &SqlitePool) -> Result<Vec<PairedDevice>> {
+    let rows = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT id, name, token_hash FROM devices ORDER BY paired_at DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .context("list paired devices")?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, name, token_hash)| PairedDevice {
+            id,
+            name,
+            token_hash,
+        })
+        .collect())
 }
 
 pub async fn pair_device(
@@ -184,24 +218,36 @@ pub async fn pair_device(
     token_hash: &str,
 ) -> Result<bool> {
     let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-    let result = sqlx::query(
-        "INSERT INTO devices(id, name, token_hash, paired_at) SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM devices)",
+    sqlx::query(
+        "INSERT INTO devices(id, name, token_hash, paired_at, last_seen_at)
+         VALUES(?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name, token_hash = excluded.token_hash, last_seen_at = excluded.last_seen_at",
     )
     .bind(id)
     .bind(name)
     .bind(token_hash)
-    .bind(now)
+    .bind(&now)
+    .bind(&now)
     .execute(pool)
     .await
-    .context("pair iPhone")?;
-    Ok(result.rows_affected() == 1)
+    .context("pair device")?;
+    Ok(true)
 }
 
 pub async fn unpair_device(pool: &SqlitePool) -> Result<()> {
     sqlx::query("DELETE FROM devices")
         .execute(pool)
         .await
-        .context("unpair iPhone")?;
+        .context("unpair all devices")?;
+    Ok(())
+}
+
+pub async fn unpair_specific_device(pool: &SqlitePool, id: &str) -> Result<()> {
+    sqlx::query("DELETE FROM devices WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .context("unpair specific device")?;
     Ok(())
 }
 
@@ -216,25 +262,6 @@ pub async fn touch_device(pool: &SqlitePool, id: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn certificate_setup_complete(pool: &SqlitePool) -> Result<bool> {
-    let value = sqlx::query_scalar::<_, String>(
-        "SELECT value FROM app_settings WHERE key = 'certificate_setup_complete'",
-    )
-    .fetch_optional(pool)
-    .await
-    .context("read certificate setup status")?;
-    Ok(value.as_deref() == Some("true"))
-}
-
-pub async fn set_certificate_setup_complete(pool: &SqlitePool) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO app_settings(key, value) VALUES('certificate_setup_complete', 'true') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-    )
-    .execute(pool)
-    .await
-    .context("save certificate setup status")?;
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
@@ -282,7 +309,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_one_device_can_pair_and_unpair_preserves_messages() -> Result<()> {
+    async fn pairing_and_unpair_preserves_messages() -> Result<()> {
         let pool = open_memory().await?;
         insert_message(
             &pool,
@@ -292,8 +319,7 @@ mod tests {
             "stored",
         )
         .await?;
-        assert!(pair_device(&pool, "iphone-a", "iPhone", "hash-a").await?);
-        assert!(!pair_device(&pool, "iphone-b", "iPhone", "hash-b").await?);
+        assert!(pair_device(&pool, "iphone-a", "iPhone A", "hash-a").await?);
         assert_eq!(paired_device(&pool).await?.unwrap().id, "iphone-a");
         unpair_device(&pool).await?;
         assert!(paired_device(&pool).await?.is_none());
@@ -313,6 +339,9 @@ mod tests {
         sqlx::query("INSERT INTO messages(id, sender_device_id, content, status, created_at) VALUES('old-id', 'iphone-main', 'old text', 'stored', '2026-01-01T00:00:00Z')")
             .execute(&pool).await?;
         sqlx::raw_sql(include_str!("../migrations/0002_message_sequence.sql"))
+            .execute(&pool)
+            .await?;
+        sqlx::raw_sql(include_str!("../migrations/0003_v2_pairing.sql"))
             .execute(&pool)
             .await?;
         let messages = recent_messages(&pool, None, 50).await?;

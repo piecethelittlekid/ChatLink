@@ -88,6 +88,13 @@ pub fn lan_ipv4_addresses() -> Vec<Ipv4Addr> {
         .collect()
 }
 
+pub fn local_hostname() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "chatlink".into())
+        .to_ascii_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,5 +106,10 @@ mod tests {
         assert!(!virtual_interface("Wi-Fi"));
         assert!(!virtual_interface("Ethernet"));
         assert!(priority("Wi-Fi") < priority("Ethernet"));
+    }
+
+    #[test]
+    fn hostname_is_not_empty() {
+        assert!(!local_hostname().is_empty());
     }
 }

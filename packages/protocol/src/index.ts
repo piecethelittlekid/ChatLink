@@ -11,17 +11,22 @@ export const envelopeSchema = z.object({
 
 export const authSchema = envelopeSchema.extend({
   type: z.literal("auth"),
-  payload: z.object({ deviceId: z.string().uuid(), token: z.string().min(40) }),
+  payload: z.object({ deviceId: z.string(), token: z.string() }),
 });
 
 export const pairingRequestSchema = envelopeSchema.extend({
   type: z.literal("pairing_request"),
-  payload: z.object({ code: z.string().regex(/^\d{6}$/) }),
+  payload: z.object({
+    deviceId: z.string().optional(),
+    name: z.string().optional(),
+    token: z.string().optional(),
+    code: z.string().optional(),
+  }),
 });
 
 export const pairingOkSchema = envelopeSchema.extend({
   type: z.literal("pairing_ok"),
-  payload: z.object({ deviceId: z.string().uuid(), token: z.string() }),
+  payload: z.object({ deviceId: z.string(), token: z.string().optional() }),
 });
 
 export const syncRequestSchema = envelopeSchema.extend({

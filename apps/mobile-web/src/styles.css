@@ -71,3 +71,8 @@ h1, h2, p { margin-top: 0; }
 .lock-icon { color: #8d9ab9; font-size: 11px; }
 @keyframes pulse { 50% { opacity: .4; } }
 @media (max-width: 370px) { .mobile-header { padding: 0 11px; gap: 7px; } .connection-pill { padding: 6px 7px; font-size: 9px; } .messages-area { padding-right: 12px; padding-left: 12px; } .setup-card { padding: 30px 24px 25px; } }
+
+.mobile-options .danger-button { margin-top: 12px; padding: 8px 10px; border: 1px solid #ead7d7; border-radius: 9px; background: #fff; color: #a04e4e; font-size: 11px; cursor: pointer; }
+.option-row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.option-label { color: #525a6c; font-size: 11px; font-weight: 700; }
+.server-input { width: 100%; padding: 8px 10px; border: 1px solid #dfe3ee; border-radius: 8px; font-size: 12px; }

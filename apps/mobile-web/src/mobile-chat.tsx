@@ -13,15 +13,41 @@ type ServerEnvelope = {
   payload?: Record<string, unknown>;
 };
 
-const BACKOFF_MS = [1000, 2000, 4000, 8000, 10000];
+const BACKOFF_MS = [500, 1000, 2000, 3000];
 const MAX_BYTES = 8192;
 
+function getOrCreateDeviceId(): string {
+  let id = localStorage.getItem("chatlink_device_id");
+  if (!id) {
+    id = typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : "iphone-" + Math.random().toString(36).substring(2, 12);
+    localStorage.setItem("chatlink_device_id", id);
+  }
+  return id;
+}
+
+function getOrCreateDeviceToken(): string {
+  let token = localStorage.getItem("chatlink_device_token");
+  if (!token) {
+    const bytes = new Uint8Array(24);
+    crypto.getRandomValues(bytes);
+    token = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    localStorage.setItem("chatlink_device_token", token);
+  }
+  return token;
+}
+
 function socketUrl(serverUrl: string) {
-  const url = new URL(serverUrl);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.pathname = "/ws";
-  url.search = "";
-  return url.toString();
+  try {
+    const url = new URL(serverUrl);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    url.pathname = "/ws";
+    url.search = "";
+    return url.toString();
+  } catch {
+    return "ws://chatlink.local:42100/ws";
+  }
 }
 
 function mergeMessages(current: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
@@ -53,10 +79,12 @@ function parseStoredMessage(raw: unknown): ChatMessage {
 }
 
 export function MobileChat() {
-  const [serverUrl, setServerUrl] = useState(window.location.origin);
+  const defaultHost = window.location.port === "5173"
+    ? "http://localhost:42100"
+    : window.location.origin;
+
+  const [serverUrl, setServerUrl] = useState(defaultHost);
   const [credentials, setCredentials] = useState<Credentials | null>(null);
-  const [pairingCode, setPairingCode] = useState("");
-  const [codeInput, setCodeInput] = useState("");
   const [storageReady, setStorageReady] = useState(false);
   const [connection, setConnection] = useState<ConnectionStatus>("disconnected");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -65,9 +93,10 @@ export function MobileChat() {
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
   const [sending, setSending] = useState(false);
+  const [pairingStatus, setPairingStatus] = useState<"idle" | "requesting" | "waiting_approval">("idle");
+
   const socketRef = useRef<WebSocket | null>(null);
   const credentialsRef = useRef<Credentials | null>(null);
-  const pairingCodeRef = useRef("");
   const outboxRef = useRef(new Map<string, ChatMessage>());
   const cursorRef = useRef(0);
   const syncCompleteRef = useRef(false);
@@ -81,8 +110,10 @@ export function MobileChat() {
   }, []);
 
   const connect = useCallback(() => {
-    if (socketRef.current && (socketRef.current.readyState === WebSocket.OPEN || socketRef.current.readyState === WebSocket.CONNECTING)) return;
-    if (!credentialsRef.current && !pairingCodeRef.current) return;
+    if (socketRef.current && (socketRef.current.readyState === WebSocket.OPEN || socketRef.current.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+
     setConnection("connecting");
     let ws: WebSocket;
     try {
@@ -92,6 +123,7 @@ export function MobileChat() {
       setError("Địa chỉ máy tính không hợp lệ.");
       return;
     }
+
     socketRef.current = ws;
     syncCompleteRef.current = false;
     let processing = Promise.resolve();
@@ -105,23 +137,41 @@ export function MobileChat() {
 
     ws.onopen = () => {
       const saved = credentialsRef.current;
-      if (saved) ws.send(JSON.stringify(createEnvelope("auth", saved)));
-      else ws.send(JSON.stringify(createEnvelope("pairing_request", { code: pairingCodeRef.current })));
+      if (saved) {
+        ws.send(JSON.stringify(createEnvelope("auth", saved)));
+      } else {
+        // Send pairing request V2
+        const deviceId = getOrCreateDeviceId();
+        const token = getOrCreateDeviceToken();
+        setPairingStatus("waiting_approval");
+        ws.send(JSON.stringify(createEnvelope("pairing_request", {
+          deviceId,
+          name: "iPhone",
+          token,
+        })));
+      }
     };
+
     ws.onmessage = (event) => {
       processing = processing.then(async () => {
         if (socketRef.current !== ws) return;
         let envelope: ServerEnvelope;
-        try { envelope = JSON.parse(String(event.data)) as ServerEnvelope; } catch { throw new Error("Dữ liệu server không hợp lệ."); }
+        try {
+          envelope = JSON.parse(String(event.data)) as ServerEnvelope;
+        } catch {
+          throw new Error("Dữ liệu server không hợp lệ.");
+        }
         const payload = envelope.payload ?? {};
+
         if (envelope.type === "pairing_ok") {
-          if (typeof payload.deviceId !== "string" || typeof payload.token !== "string") throw new Error("Thông tin ghép đôi không hợp lệ.");
-          const saved = { deviceId: payload.deviceId, token: payload.token };
+          const deviceId = typeof payload.deviceId === "string" ? payload.deviceId : getOrCreateDeviceId();
+          const token = typeof payload.token === "string" ? payload.token : getOrCreateDeviceToken();
+          const saved = { deviceId, token };
           await saveCredentials(saved);
           credentialsRef.current = saved;
-          pairingCodeRef.current = "";
           setCredentials(saved);
-          setPairingCode("");
+          setPairingStatus("idle");
+          setError("");
           ws.send(JSON.stringify(createEnvelope("auth", saved)));
         } else if (envelope.type === "auth_ok") {
           attemptsRef.current = 0;
@@ -132,7 +182,9 @@ export function MobileChat() {
             throw new Error("Phản hồi đồng bộ không hợp lệ.");
           }
           const batch = payload.messages.map(parseStoredMessage);
-          if (payload.nextSeq < cursorRef.current || !Number.isSafeInteger(payload.nextSeq)) throw new Error("Con trỏ đồng bộ không hợp lệ.");
+          if (payload.nextSeq < cursorRef.current || !Number.isSafeInteger(payload.nextSeq)) {
+            throw new Error("Con trỏ đồng bộ không hợp lệ.");
+          }
           await saveSyncBatch(batch, payload.nextSeq);
           cursorRef.current = payload.nextSeq;
           for (const message of batch) {
@@ -144,8 +196,9 @@ export function MobileChat() {
           setPendingCount(outboxRef.current.size);
           addOrUpdate(batch);
           if (ws.readyState === WebSocket.OPEN) {
-            if (payload.hasMore) ws.send(JSON.stringify(createEnvelope("sync_request", { afterSeq: cursorRef.current })));
-            else {
+            if (payload.hasMore) {
+              ws.send(JSON.stringify(createEnvelope("sync_request", { afterSeq: cursorRef.current })));
+            } else {
               syncCompleteRef.current = true;
               setConnection("connected");
               flushOutbox();
@@ -173,26 +226,13 @@ export function MobileChat() {
           if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(createEnvelope("pong", {})));
         } else if (envelope.type === "error") {
           const code = String(payload.code ?? "");
-          if (["AUTH_FAILED", "AUTH_REQUIRED", "PAIRING_CODE_INVALID", "ALREADY_PAIRED", "RATE_LIMITED"].includes(code)) {
-            shouldReconnectRef.current = false;
-            if (code === "AUTH_FAILED") {
-              await clearCredentials();
-              credentialsRef.current = null;
-              setCredentials(null);
-            }
-            if (!credentialsRef.current) {
-              pairingCodeRef.current = "";
-              setPairingCode("");
-            }
-            setError(code === "PAIRING_CODE_INVALID" ? "Mã ghép đôi sai hoặc đã hết hạn."
-              : code === "ALREADY_PAIRED" ? "Máy tính đã ghép đôi với một iPhone khác."
-                : code === "RATE_LIMITED" ? "Thử quá nhiều lần. Hãy đợi một phút."
-                  : "Không xác thực được thiết bị. Hãy ghép đôi lại trên Windows.");
-          } else if (code === "MESSAGE_RATE_LIMITED") {
-            setError("Gửi quá nhanh; tin pending sẽ được thử lại sau 10 giây.");
-            window.setTimeout(flushOutbox, 10000);
+          if (code === "PAIRING_REJECTED") {
+            setPairingStatus("idle");
+            setError("Yêu cầu ghép đôi bị từ chối trên máy tính.");
+          } else if (code === "AUTH_FAILED") {
+            setError("Thông tin xác thực chưa khớp. Bấm 'Quên ghép đôi' ở Tùy chọn nếu bạn muốn ghép đôi lại.");
           } else {
-            setError(code === "DATABASE_ERROR" ? "Máy tính không lưu được tin nhắn." : "Server từ chối tin nhắn. Kiểm tra nội dung và thử lại.");
+            setError(String(payload.message ?? "Lỗi từ máy tính."));
           }
         }
       }).catch((reason) => {
@@ -200,13 +240,20 @@ export function MobileChat() {
         ws.close();
       });
     };
-    ws.onerror = () => { if (socketRef.current === ws) setError("Không kết nối được. Kiểm tra Wi-Fi và chứng chỉ ChatLink."); };
+
+    ws.onerror = () => {
+      if (socketRef.current === ws) {
+        setError("Chưa kết nối được tới máy tính. Đang tự động thử lại...");
+      }
+    };
+
     ws.onclose = () => {
       if (socketRef.current !== ws) return;
       socketRef.current = null;
       syncCompleteRef.current = false;
       setConnection("disconnected");
-      if (shouldReconnectRef.current && (credentialsRef.current || pairingCodeRef.current)) {
+
+      if (shouldReconnectRef.current) {
         const delay = BACKOFF_MS[Math.min(attemptsRef.current, BACKOFF_MS.length - 1)];
         attemptsRef.current += 1;
         retryTimerRef.current = window.setTimeout(connect, delay);
@@ -214,6 +261,7 @@ export function MobileChat() {
     };
   }, [serverUrl, addOrUpdate]);
 
+  // Load persistent state
   useEffect(() => {
     let live = true;
     void loadLocalState().then((saved) => {
@@ -225,23 +273,44 @@ export function MobileChat() {
       setMessages(mergeMessages(saved.messages, saved.outbox));
       setPendingCount(saved.outbox.length);
       setStorageReady(true);
-    }).catch(() => setError("Không mở được IndexedDB. Kiểm tra dung lượng và quyền lưu trữ của Safari."));
+    }).catch(() => setError("Không mở được bộ nhớ IndexedDB."));
     return () => { live = false; };
   }, []);
 
+  // Instant Reconnect & Lifecycle Hooking
   useEffect(() => {
-    if (!storageReady || (!credentials && !pairingCode)) return;
+    if (!storageReady) return;
     shouldReconnectRef.current = true;
     connect();
+
     const heartbeat = window.setInterval(() => {
       if (socketRef.current?.readyState === WebSocket.OPEN && credentialsRef.current) {
         socketRef.current.send(JSON.stringify(createEnvelope("ping", {})));
       }
     }, 15000);
-    const resume = () => { if (document.visibilityState === "visible") connect(); };
-    document.addEventListener("visibilitychange", resume);
-    return () => { window.clearInterval(heartbeat); document.removeEventListener("visibilitychange", resume); };
-  }, [storageReady, credentials, pairingCode, connect]);
+
+    // Instant trigger when user opens phone or switches back to ChatLink
+    const triggerInstant = () => {
+      if (document.visibilityState === "visible") {
+        window.clearTimeout(retryTimerRef.current);
+        attemptsRef.current = 0;
+        connect();
+      }
+    };
+
+    document.addEventListener("visibilitychange", triggerInstant);
+    window.addEventListener("pageshow", triggerInstant);
+    window.addEventListener("focus", triggerInstant);
+    window.addEventListener("online", triggerInstant);
+
+    return () => {
+      window.clearInterval(heartbeat);
+      document.removeEventListener("visibilitychange", triggerInstant);
+      window.removeEventListener("pageshow", triggerInstant);
+      window.removeEventListener("focus", triggerInstant);
+      window.removeEventListener("online", triggerInstant);
+    };
+  }, [storageReady, connect]);
 
   useEffect(() => () => {
     shouldReconnectRef.current = false;
@@ -253,22 +322,30 @@ export function MobileChat() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages.at(-1)?.id]);
 
-  function submitCode(event: FormEvent) {
-    event.preventDefault();
-    const code = codeInput.trim();
-    if (!/^\d{6}$/.test(code)) { setError("Nhập mã ghép đôi gồm 6 chữ số trên Windows."); return; }
-    pairingCodeRef.current = code;
-    setPairingCode(code);
+  function requestPairing() {
+    setPairingStatus("requesting");
     setError("");
+    window.clearTimeout(retryTimerRef.current);
+    attemptsRef.current = 0;
+    connect();
   }
 
   async function submitMessage(event: FormEvent) {
     event.preventDefault();
     const content = draft.trim();
     if (!content || !storageReady || sending) return;
-    if (new TextEncoder().encode(content).length > MAX_BYTES) { setError("Tin nhắn vượt giới hạn 8 KB."); return; }
+    if (new TextEncoder().encode(content).length > MAX_BYTES) {
+      setError("Tin nhắn vượt giới hạn 8 KB.");
+      return;
+    }
     setSending(true);
-    const message: ChatMessage = { id: ulid(), sender: "iphone", content, status: "pending", createdAt: new Date().toISOString() };
+    const message: ChatMessage = {
+      id: ulid(),
+      sender: "iphone",
+      content,
+      status: "pending",
+      createdAt: new Date().toISOString(),
+    };
     try {
       await queueOutgoing(message);
       outboxRef.current.set(message.id, message);
@@ -280,7 +357,7 @@ export function MobileChat() {
         socketRef.current.send(JSON.stringify(createEnvelope("chat_message", { content }, message.id)));
       }
     } catch {
-      setError("Không lưu được tin pending trên iPhone. Kiểm tra dung lượng lưu trữ.");
+      setError("Không lưu được tin pending trên iPhone.");
     } finally {
       setSending(false);
     }
@@ -290,10 +367,11 @@ export function MobileChat() {
     shouldReconnectRef.current = false;
     socketRef.current?.close();
     credentialsRef.current = null;
-    pairingCodeRef.current = "";
     await clearCredentials();
+    localStorage.removeItem("chatlink_device_id");
+    localStorage.removeItem("chatlink_device_token");
     setCredentials(null);
-    setPairingCode("");
+    setPairingStatus("idle");
     setOptionsOpen(false);
     setConnection("disconnected");
   }
@@ -315,8 +393,10 @@ export function MobileChat() {
     try {
       if (file.size > 2_000_000) throw new Error("Tệp quá lớn.");
       const parsed = JSON.parse(await file.text()) as { version?: unknown; messages?: unknown };
-      if (parsed.version !== 1 || !Array.isArray(parsed.messages) || parsed.messages.length > 1000) throw new Error("Tệp outbox không hợp lệ.");
-      const existing = new Set(messages.map((message) => message.id));
+      if (parsed.version !== 1 || !Array.isArray(parsed.messages) || parsed.messages.length > 1000) {
+        throw new Error("Tệp outbox không hợp lệ.");
+      }
+      const existing = new Set(messages.map((m) => m.id));
       const pending: ChatMessage[] = [];
       for (const raw of parsed.messages) {
         const value = raw as Partial<ChatMessage>;
@@ -353,37 +433,51 @@ export function MobileChat() {
     </div>
   );
 
+  // First-time onboarding: 1-touch pairing
   if (!storageReady || !credentials) {
     return (
       <main className="mobile-shell setup-shell">
         <div className="setup-brand"><div className="brand-mark">C</div><span>ChatLink</span></div>
         <section className="setup-card">
-          <div className="setup-icon">⌁</div>
-          <p className="eyebrow">PRIVATE LAN CHAT</p>
-          <h1>Ghép đôi với máy tính</h1>
-          <p className="setup-copy">Mở ChatLink trên Windows rồi nhập mã ghép đôi đang hiển thị. Chỉ cần làm một lần.</p>
-          <form onSubmit={submitCode} className="setup-form">
-            {["localhost", "127.0.0.1"].includes(window.location.hostname) && (
-              <label className="field-label">Địa chỉ server thử nghiệm
-                <input value={serverUrl} onChange={(event) => setServerUrl(event.target.value)} placeholder="https://192.168.1.15:42100" autoCapitalize="none" />
-              </label>
-            )}
-            <label className="field-label">Mã ghép đôi
-              <input className="code-input" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={codeInput} onChange={(event) => setCodeInput(event.target.value.replace(/\D/g, ""))} placeholder="000 000" />
+          <div className="setup-icon">✦</div>
+          <p className="eyebrow">LAN CHAT V2</p>
+          <h1>Kết nối với máy tính</h1>
+          <p className="setup-copy">
+            {pairingStatus === "waiting_approval"
+              ? "Đã gửi yêu cầu kết nối! Hãy bấm [Cho phép] trên màn hình máy tính Windows của bạn."
+              : "Đảm bảo iPhone đang kết nối cùng Wi-Fi với máy tính. Chỉ cần ghép đôi một lần duy nhất."}
+          </p>
+
+          <div className="setup-form">
+            <label className="field-label">Địa chỉ máy tính
+              <input
+                value={serverUrl}
+                onChange={(event) => setServerUrl(event.target.value)}
+                placeholder="http://chatlink.local:42100"
+                autoCapitalize="none"
+              />
             </label>
+
             {error && <p className="form-error">{error}</p>}
-            <button className="primary-button" type="submit" disabled={!storageReady || !!pairingCode}>{pairingCode ? "Đang ghép đôi…" : "Ghép đôi iPhone"} <span>→</span></button>
-            {pairingCode && <button className="cancel-pairing" type="button" onClick={() => {
-              shouldReconnectRef.current = false;
-              pairingCodeRef.current = "";
-              setPairingCode("");
-              socketRef.current?.close();
-            }}>Nhập lại mã ghép đôi</button>}
-          </form>
+
+            <button
+              className="primary-button"
+              type="button"
+              disabled={!storageReady || connection === "connecting"}
+              onClick={requestPairing}
+            >
+              {connection === "connecting"
+                ? "Đang kết nối..."
+                : pairingStatus === "waiting_approval"
+                ? "Đang đợi máy tính đồng ý…"
+                : "Kết nối máy tính"} <span>→</span>
+            </button>
+          </div>
+
           {transfer}
-          <p className="setup-footnote">Cùng Wi-Fi với Windows. Mã ghép đôi hết hạn sau 10 phút.</p>
+          <p className="setup-footnote">Tự động kết nối vĩnh viễn ở các lần mở app sau.</p>
         </section>
-        <p className="version-note">ChatLink · LAN chat</p>
+        <p className="version-note">ChatLink V2 · Zero-Touch LAN chat</p>
       </main>
     );
   }
@@ -391,34 +485,80 @@ export function MobileChat() {
   return (
     <main className="mobile-shell chat-shell">
       <header className="mobile-header">
-        <div className="header-brand"><div className="brand-mark small">C</div><div><strong>ChatLink</strong><span>iPhone · Private chat</span></div></div>
-        <div className={`connection-pill ${connection}`}><i />{connection === "connected" ? "Đã kết nối" : connection === "connecting" ? "Đang nối" : "Ngoại tuyến"}</div>
+        <div className="header-brand">
+          <div className="brand-mark small">C</div>
+          <div><strong>ChatLink</strong><span>iPhone · LAN chat</span></div>
+        </div>
+        <div className={`connection-pill ${connection}`}>
+          <i />{connection === "connected" ? "Đã kết nối" : connection === "connecting" ? "Đang nối" : "Ngoại tuyến"}
+        </div>
         <button className="more-button" aria-label="Tùy chọn kết nối" onClick={() => setOptionsOpen(!optionsOpen)}>···</button>
       </header>
-      {optionsOpen && <section className="mobile-options">
-        <p>Khi IP máy tính đổi, xuất tin pending từ biểu tượng cũ rồi nhập ở địa chỉ mới.</p>
-        {transfer}
-        <button type="button" onClick={() => void forgetCredentials()}>Quên ghép đôi trên iPhone</button>
-      </section>}
+
+      {optionsOpen && (
+        <section className="mobile-options">
+          <div className="option-row">
+            <span className="option-label">Địa chỉ máy tính</span>
+            <input
+              className="server-input"
+              value={serverUrl}
+              onChange={(e) => setServerUrl(e.target.value)}
+              placeholder="http://chatlink.local:42100"
+            />
+          </div>
+          {transfer}
+          <button type="button" className="danger-button" onClick={() => void forgetCredentials()}>
+            Quên ghép đôi trên iPhone
+          </button>
+        </section>
+      )}
+
       {error && <div className="connection-banner">{error}</div>}
+
       <section className="messages-area" aria-live="polite">
         {messages.length === 0 ? (
-          <div className="empty-chat"><div className="empty-bubble">✦</div><h1>Bắt đầu cuộc trò chuyện</h1><p>Tin nhắn được lưu trên Windows và đồng bộ lại khi kết nối.</p></div>
+          <div className="empty-chat">
+            <div className="empty-bubble">✦</div>
+            <h1>Bắt đầu cuộc trò chuyện</h1>
+            <p>Tin nhắn lưu an toàn trên máy tính và tự động đồng bộ khi cùng Wi-Fi.</p>
+          </div>
         ) : messages.map((message) => (
           <article key={message.id} className={`message-row ${message.sender === "iphone" ? "outgoing" : "incoming"}`}>
             <div className="message-bubble">
               <p>{message.content}</p>
-              <div className="message-meta"><time>{new Intl.DateTimeFormat("vi-VN", { hour: "2-digit", minute: "2-digit" }).format(new Date(message.createdAt))}</time>{message.sender === "iphone" && <span>{message.status === "pending" ? "◷" : "✓"}</span>}</div>
+              <div className="message-meta">
+                <time>{new Intl.DateTimeFormat("vi-VN", { hour: "2-digit", minute: "2-digit" }).format(new Date(message.createdAt))}</time>
+                {message.sender === "iphone" && <span>{message.status === "pending" ? "◷" : "✓"}</span>}
+              </div>
             </div>
           </article>
         ))}
         <div ref={bottomRef} />
       </section>
+
       <form className="composer" onSubmit={(event) => void submitMessage(event)}>
-        <textarea value={draft} onChange={(event) => setDraft(event.target.value)} rows={1} maxLength={8192} placeholder="Viết tin nhắn…" aria-label="Tin nhắn" onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
-        <button className="send-button" type="submit" aria-label="Gửi tin nhắn" disabled={!draft.trim() || sending}><span>↑</span></button>
+        <textarea
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          rows={1}
+          maxLength={8192}
+          placeholder="Viết tin nhắn…"
+          aria-label="Tin nhắn"
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              event.currentTarget.form?.requestSubmit();
+            }
+          }}
+        />
+        <button className="send-button" type="submit" aria-label="Gửi tin nhắn" disabled={!draft.trim() || sending}>
+          <span>↑</span>
+        </button>
       </form>
-      <footer className="mobile-footer"><span className="lock-icon">⌑</span> {pendingCount > 0 ? `${pendingCount} tin đang chờ gửi · ` : ""}Tin nhắn lưu trên máy tính</footer>
+
+      <footer className="mobile-footer">
+        <span className="lock-icon">⌑</span> {pendingCount > 0 ? `${pendingCount} tin đang chờ gửi · ` : ""}Bật app là tự động kết nối
+      </footer>
     </main>
   );
 }
